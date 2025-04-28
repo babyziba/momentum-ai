@@ -8,10 +8,17 @@ from nba_api.stats.static import players
 from nba_api.stats.endpoints import playergamelog, scoreboardv2
 import numpy as np
 from nba_api.stats.endpoints import leaguedashteamstats
+from nba_api.stats.endpoints import leaguedashplayerstats
 
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+def detect_season_type():
+    now = datetime.now()
+    if now.month >= 4 and now.month <= 7:
+        return "Playoffs"
+    return "Regular Season"
 
 class MomentumAgent(AbstractAgent):
     def __init__(self):
@@ -35,6 +42,9 @@ class MomentumAgent(AbstractAgent):
             "best overs",
             "best unders",
             "safe picks",
+            "consistency player <Name> <Stat> <PropLine>",
+            "auto flex",
+            "trend breakers"
             "help"
         ]
         }
@@ -45,7 +55,10 @@ class MomentumAgent(AbstractAgent):
     ("Stephen Curry", "3PM", 4.5),
     ("Domantas Sabonis", "REB", 12.5),
     ("Tyrese Haliburton", "AST", 8.5),
+
+    
 ]
+    
 
     def assist(self, input_text: str, context: dict):
         query = input_text.strip()
@@ -80,6 +93,15 @@ class MomentumAgent(AbstractAgent):
             yield from self.simulate_game(query)
             return
         
+        if q_lower.startswith("consistency player"):
+            yield from self.handle_consistency_tracker(query)
+            return
+
+        if "auto flex" in q_lower:
+            yield from self.handle_auto_flex_builder()
+            return
+
+        
         if q_lower.startswith("team momentum"):
             yield from self.get_team_momentum(query)
             return
@@ -91,6 +113,12 @@ class MomentumAgent(AbstractAgent):
         if q_lower.startswith("best unders"):
             yield from self.handle_best_unders()
             return
+        
+        if q_lower.startswith("trend breakers"):
+            yield from self.handle_auto_trend_breakers()
+            return
+
+
 
         if "safe picks" in q_lower:
             yield from self.handle_safe_picks()
@@ -152,11 +180,183 @@ class MomentumAgent(AbstractAgent):
             logger.error(f"Error fetching clutch leaders: {e}")
             yield {"text": "❌ Error fetching clutch leaders."}
 
+    def handle_consistency_tracker(self, query):
+        try:
+            parts = query.split()
+            if len(parts) < 5:
+                yield {"text": "⚠️ Usage: `consistency player <Name> <Stat> <PropLine>` (e.g., consistency player Chris Paul AST 7.5)"}
+                return
+
+            name = " ".join(parts[2:-2])
+            stat = parts[-2].upper()
+            prop_line = float(parts[-1])
+
+            stat_map = {
+                "PTS": "PTS",
+                "AST": "AST",
+                "REB": "REB",
+                "3PM": "FG3M"
+            }
+            if stat not in stat_map:
+                yield {"text": "⚠️ Stat must be one of: PTS, AST, REB, 3PM."}
+                return
+
+            matches = players.find_players_by_full_name(name)
+            if not matches:
+                yield {"text": f"❌ Couldn't find player '{name}'."}
+                return
+
+            player_id = matches[0]["id"]
+            df = playergamelog.PlayerGameLog(
+                player_id=player_id,
+                season=f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}",
+                season_type_all_star=detect_season_type()
+            ).get_data_frames()[0]
+
+            if df.empty:
+                yield {"text": f"❌ No game logs found for {name.title()}."}
+                return
+
+            df = df.sort_values(by="GAME_DATE", ascending=False)
+            last30 = df.head(10)  # Approx 30 days = ~10 games
+
+            values = last30[stat_map[stat]]
+            hits = sum(values > prop_line)
+            pct = (hits / len(last30)) * 100
+
+            text = (
+                f"📚 Consistency Tracker for {name.title()} ({stat} > {prop_line}):\n"
+                f"- Hit {hits}/{len(last30)} games ({pct:.0f}%) over last 30 days."
+            )
+            yield {"text": text}
+        except Exception as e:
+            logger.error(f"Error in handle_consistency_tracker: {e}")
+            yield {"text": "❌ Error checking consistency."}
+
+
+    def handle_auto_flex_builder(self):
+        try:
+            candidates = [
+                ("LeBron James", "PTS", 24.5),
+                ("Anthony Davis", "REB", 9.5),
+                ("Stephen Curry", "3PM", 4.5),
+                ("Domantas Sabonis", "REB", 12.5),
+                ("Tyrese Haliburton", "AST", 8.5),
+                ("Devin Booker", "PTS", 27.5),
+                ("Jayson Tatum", "REB", 8.5),
+                ("Luka Doncic", "AST", 8.5),
+                ("James Harden", "AST", 8.5),
+                ("Jimmy Butler", "PTS", 21.5),
+            ]
+
+            slip = []
+            for name, stat, prop_line in candidates:
+                matches = players.find_players_by_full_name(name)
+                if not matches:
+                    continue
+                player_id = matches[0]["id"]
+                df = playergamelog.PlayerGameLog(
+                    player_id=player_id,
+                    season=f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}",
+                    season_type_all_star=detect_season_type()
+                ).get_data_frames()[0]
+                if df.empty:
+                    continue
+                df = df.sort_values(by="GAME_DATE", ascending=False)
+                last5 = df.head(5)
+
+                stat_map = {
+                    "PTS": "PTS",
+                    "REB": "REB",
+                    "AST": "AST",
+                    "3PM": "FG3M"
+                }
+                values = last5[stat_map[stat]]
+                hits = sum(values > prop_line)
+                pct = (hits/5) * 100
+
+                if pct >= 80:
+                    slip.append(f"- {name} Over {prop_line} {stat} ({pct:.0f}%)")
+
+                if len(slip) == 5:
+                    break
+
+            if not slip:
+                yield {"text": "⚠️ No strong Auto Flex picks today."}
+                return
+
+            text = "🤖 Auto Flex Picks (80%+ hit rate):\n" + "\n".join(slip)
+            yield {"text": text}
+        except Exception as e:
+            logger.error(f"Error in handle_auto_flex_builder: {e}")
+            yield {"text": "❌ Error generating auto flex picks."}
+
+    def handle_auto_trend_breakers(self):
+        """
+        Auto-detect top 5 trend breakers (biggest underperformers and overperformers)
+        """
+        text = "⚡ Trend Breakers & Hot Streaks:\n"
+        try:
+            player_list = [
+                "LeBron James", "Stephen Curry", "Kevin Durant", "Devin Booker", "Jayson Tatum",
+                "Giannis Antetokounmpo", "Jimmy Butler", "Anthony Davis", "Damian Lillard", "Tyrese Haliburton"
+            ]
+
+            entries = []
+
+            for name in player_list:
+                matches = players.find_players_by_full_name(name)
+                if not matches:
+                    continue
+
+                player_id = matches[0]["id"]
+                season = f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}"
+                df = playergamelog.PlayerGameLog(
+                    player_id=player_id,
+                    season=season,
+                    season_type_all_star=detect_season_type()
+                ).get_data_frames()[0]
+
+                if df.empty:
+                    continue
+
+                df = df.sort_values(by="GAME_DATE", ascending=False)
+                season_avg = df["PTS"].mean()
+                last_game = df.iloc[0]
+
+                pts = last_game["PTS"]
+                diff = pts - season_avg
+                pct_change = (diff / season_avg) * 100
+
+                entries.append((name, pts, season_avg, pct_change))
+
+            # Sort by biggest % change
+            entries.sort(key=lambda x: abs(x[3]), reverse=True)
+
+            top5 = entries[:5]
+
+            for name, pts, season_avg, pct in top5:
+                if pct < -20:
+                    text += f"❌ {name}: scored {pts} pts ({pct:.0f}% below avg)\n"
+                elif pct > 20:
+                    text += f"🔥 {name}: scored {pts} pts ({pct:.0f}% above avg)\n"
+
+            if not top5:
+                text = "⚠️ No major trend breakers found today."
+
+            yield {"text": text}
+
+        except Exception as e:
+            logger.error(f"Error in handle_auto_trend_breakers: {e}")
+            yield {"text": "❌ Error finding trend breakers."}
+
+
+
     def handle_best_overs(self):
         try:
-            # Pick 5 popular players
             names = ["LeBron James", "Anthony Davis", "Jayson Tatum", "Stephen Curry", "Devin Booker"]
             text = "🔥 Best OVER Performers (last 5 games):\n"
+            found = False  # <-- ADDED
             for name in names:
                 matches = players.find_players_by_full_name(name)
                 if not matches:
@@ -166,20 +366,31 @@ class MomentumAgent(AbstractAgent):
                 df = playergamelog.PlayerGameLog(
                     player_id=player_id,
                     season=season,
-                    season_type_all_star="Regular Season"
+                    season_type_all_star=detect_season_type()
                 ).get_data_frames()[0]
+
                 if df.empty:
                     continue
+
+                df = df.sort_values(by="GAME_DATE", ascending=False)
                 last5 = df.head(5)["PTS"]
-                prop_line = last5.mean() * 0.9  # Assume prop ~10% lower than avg points
+                prop_line = last5.mean() * 0.9
                 hits = sum(last5 > prop_line)
-                pct = (hits/5)*100
-                if pct >= 60:  # Only show if 60%+ hit rate
+                pct = (hits/5) * 100
+
+                if pct >= 60:
                     text += f"- {name}: Over {prop_line:.1f} pts → {hits}/5 ({pct:.0f}%)\n"
+                    found = True
+
+            if not found:
+                text += "\n⚠️ No strong overs available today."
+
             yield {"text": text}
         except Exception as e:
             logger.error(f"Error in handle_best_overs: {e}")
             yield {"text": "❌ Error generating best overs."}
+
+
 
     def handle_best_unders(self):
         try:
@@ -194,11 +405,11 @@ class MomentumAgent(AbstractAgent):
                 df = playergamelog.PlayerGameLog(
                     player_id=player_id,
                     season=season,
-                    season_type_all_star="Regular Season"
+                    season_type_all_star=detect_season_type()
                 ).get_data_frames()[0]
                 if df.empty:
                     continue
-                last5 = df.head(5)["PTS"]
+                last5 = df.sort_values(by="GAME_DATE", ascending=False).head(5)["PTS"]
                 prop_line = last5.mean() * 1.1  # Assume prop ~10% higher than avg points
                 misses = sum(last5 < prop_line)
                 pct = (misses/5)*100
@@ -225,11 +436,13 @@ class MomentumAgent(AbstractAgent):
                 df = playergamelog.PlayerGameLog(
                     player_id=player_id,
                     season=season,
-                    season_type_all_star="Regular Season"
+                    season_type_all_star=detect_season_type()
                 ).get_data_frames()[0]
 
                 if df.empty:
                     continue
+
+                last5 = df.sort_values(by="GAME_DATE", ascending=False).head(5)
 
                 stat_map = {
                     "PTS": "PTS",
@@ -240,7 +453,6 @@ class MomentumAgent(AbstractAgent):
                 if stat not in stat_map:
                     continue
 
-                last5 = df.head(5)
                 values = last5[stat_map[stat]]
                 hits = sum(values > prop_line)
                 pct = (hits / 5) * 100
@@ -259,51 +471,58 @@ class MomentumAgent(AbstractAgent):
         yield {"text": text}
 
 
-
-    def get_team_momentum(self, query):
+    def handle_best_overs(self):
         try:
-            parts = query.split()
-            if len(parts) < 3:
-                yield {"text": "⚠️ Usage: `team momentum <Team Abbreviation>` (e.g., team momentum LAL)"}
-                return
+            text = "🔥 Best OVER Performers (last 5 games):\n"
+            found = False
 
-            team_abbr = parts[2].upper()
+            for name, stat, prop_line in self.DEFAULT_PROPS:
+                matches = players.find_players_by_full_name(name)
+                if not matches:
+                    continue
 
-            from nba_api.stats.endpoints import teamgamelog
-            from nba_api.stats.static import teams
+                player_id = matches[0]["id"]
+                season = f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}"
+                df = playergamelog.PlayerGameLog(
+                    player_id=player_id,
+                    season=season,
+                    season_type_all_star=detect_season_type()
+                ).get_data_frames()[0]
 
-            team_list = teams.get_teams()
-            team_id = next((t['id'] for t in team_list if t['abbreviation'] == team_abbr), None)
+                if df.empty:
+                    continue
 
-            if not team_id:
-                yield {"text": f"❌ Could not find team '{team_abbr}'."}
-                return
+                df = df.sort_values(by="GAME_DATE", ascending=False)
+                last5 = df.head(5)
 
-            season = f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}"
-            df = teamgamelog.TeamGameLog(
-                team_id=team_id,
-                season=season,
-                season_type_all_star="Regular Season"
-            ).get_data_frames()[0]
+                stat_map = {
+                    "PTS": "PTS",
+                    "REB": "REB",
+                    "AST": "AST",
+                    "3PM": "FG3M"
+                }
 
-            if df.empty:
-                yield {"text": f"❌ No games found for {team_abbr}."}
-                return
+                if stat not in stat_map:
+                    continue
 
-            last5 = df.head(5)
-            wins = sum(last5['WL'] == "W")
-            ortg_diff = last5['PTS'].mean() - last5['PTS'].tail(5).mean()
+                values = last5[stat_map[stat]]
+                hits = sum(values > prop_line)
+                pct = (hits / 5) * 100
 
-            text = (
-                f"🏀 {team_abbr} Momentum Report:\n"
-                f"- Last 5 Games: {wins} Wins\n"
-                f"- ORTG Trend: {ortg_diff:+.1f} PPG vs previous 5\n"
-            )
+                if pct >= 60:
+                    text += f"- {name}: Over {prop_line} {stat} → {hits}/5 ({pct:.0f}%)\n"
+                    found = True
+
+            if not found:
+                text += "\n⚠️ No strong overs available today."
+
             yield {"text": text}
 
         except Exception as e:
-            logger.error(f"Error in get_team_momentum: {e}")
-            yield {"text": "❌ Error fetching team momentum."}
+            logger.error(f"Error in handle_best_overs: {e}")
+            yield {"text": "❌ Error generating best overs."}
+
+
 
 
 
@@ -388,14 +607,15 @@ class MomentumAgent(AbstractAgent):
                 df = playergamelog.PlayerGameLog(
                     player_id=player_id,
                     season=season,
-                    season_type_all_star="Regular Season"
+                    season_type_all_star=detect_season_type()
                 ).get_data_frames()[0]
+                df = df.sort_values(by="GAME_DATE", ascending=False)
 
                 if df.empty:
                     yield {"text": f"❌ No game logs for {name.title()} in {season}."}
                     return
 
-                last5 = df.head(5)
+                last5 = df.sort_values(by="GAME_DATE", ascending=False).head(5)
                 values = last5[stat_map[stat]]
                 hits = sum(values > prop_line)
                 pct = (hits / 5) * 100
@@ -424,8 +644,9 @@ class MomentumAgent(AbstractAgent):
         df = playergamelog.PlayerGameLog(
             player_id=player_id,
             season=season,
-            season_type_all_star="Regular Season"
+            season_type_all_star=detect_season_type()
         ).get_data_frames()[0]
+        df = df.sort_values(by="GAME_DATE", ascending=False)
 
         if df.empty:
             yield {"text": f"❌ No games found for {name.title()} in {season}."}
@@ -456,14 +677,15 @@ class MomentumAgent(AbstractAgent):
         df = playergamelog.PlayerGameLog(
             player_id=player_id,
             season=season,
-            season_type_all_star="Regular Season"
+            season_type_all_star=detect_season_type()
         ).get_data_frames()[0]
+        df = df.sort_values(by="GAME_DATE", ascending=False)
 
         if df.empty:
             yield {"text": f"❌ No game logs for {name.title()}."}
             return
 
-        last5 = df.head(5)
+        last5 = df.sort_values(by="GAME_DATE", ascending=False).head(5)
         score_sum = (last5["PTS"] + last5["REB"] + last5["AST"]).sum()
         avg_score = score_sum / len(last5)
 
@@ -522,12 +744,15 @@ class MomentumAgent(AbstractAgent):
         df = playergamelog.PlayerGameLog(
             player_id=player_id,
             season=season,
-            season_type_all_star="Regular Season"
+            season_type_all_star=detect_season_type()
         ).get_data_frames()[0]
+        df = df.sort_values(by="GAME_DATE", ascending=False)
 
         if df.empty:
             yield {"text": f"❌ No game logs for {name.title()} in {season}."}
             return
+
+        
 
         text = f"📊 Last 5 Games for {name.title()} ({season}):\n"
         total_ast = 0
@@ -544,6 +769,7 @@ class MomentumAgent(AbstractAgent):
         text += f"\n➕ Avg Assists (last 5): {avg_ast:.1f}\n"
         yield {"text": text}
 
+
     def handle_risk_index(self, query):
         name = query[len("risk index"):].strip()
         matches = players.find_players_by_full_name(name)
@@ -556,8 +782,9 @@ class MomentumAgent(AbstractAgent):
         df = playergamelog.PlayerGameLog(
             player_id=player_id,
             season=season,
-            season_type_all_star="Regular Season"
+            season_type_all_star=detect_season_type()
         ).get_data_frames()[0]
+        df = df.sort_values(by="GAME_DATE", ascending=False)
 
         if df.empty:
             yield {"text": f"❌ No game logs for {name.title()} in {season}."}
