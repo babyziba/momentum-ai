@@ -32,6 +32,9 @@ class MomentumAgent(AbstractAgent):
             "simulate game <Team1> vs <Team2>",
             "clutch leaders",
             "team momentum <Team Abbreviation>",
+            "best overs",
+            "best unders",
+            "safe picks",
             "help"
         ]
         }
@@ -72,7 +75,18 @@ class MomentumAgent(AbstractAgent):
         if q_lower.startswith("team momentum"):
             yield from self.get_team_momentum(query)
             return
+        
+        if q_lower.startswith("best overs"):
+            yield from self.handle_best_overs()
+            return
 
+        if q_lower.startswith("best unders"):
+            yield from self.handle_best_unders()
+            return
+
+        if q_lower.startswith("safe picks"):
+            yield from self.handle_safe_picks()
+            return
 
         if "clutch leaders" in q_lower:
             yield from self.get_clutch_leaders()
@@ -128,6 +142,96 @@ class MomentumAgent(AbstractAgent):
         except Exception as e:
             logger.error(f"Error fetching clutch leaders: {e}")
             yield {"text": "❌ Error fetching clutch leaders."}
+
+    def handle_best_overs(self):
+        try:
+            # Pick 5 popular players
+            names = ["LeBron James", "Anthony Davis", "Jayson Tatum", "Stephen Curry", "Devin Booker"]
+            text = "🔥 Best OVER Performers (last 5 games):\n"
+            for name in names:
+                matches = players.find_players_by_full_name(name)
+                if not matches:
+                    continue
+                player_id = matches[0]["id"]
+                season = f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}"
+                df = playergamelog.PlayerGameLog(
+                    player_id=player_id,
+                    season=season,
+                    season_type_all_star="Regular Season"
+                ).get_data_frames()[0]
+                if df.empty:
+                    continue
+                last5 = df.head(5)["PTS"]
+                prop_line = last5.mean() * 0.9  # Assume prop ~10% lower than avg points
+                hits = sum(last5 > prop_line)
+                pct = (hits/5)*100
+                if pct >= 60:  # Only show if 60%+ hit rate
+                    text += f"- {name}: Over {prop_line:.1f} pts → {hits}/5 ({pct:.0f}%)\n"
+            yield {"text": text}
+        except Exception as e:
+            logger.error(f"Error in handle_best_overs: {e}")
+            yield {"text": "❌ Error generating best overs."}
+
+    def handle_best_unders(self):
+        try:
+            names = ["James Harden", "Chris Paul", "DeMar DeRozan", "Jimmy Butler", "Russell Westbrook"]
+            text = "❄️ Best UNDER Performers (last 5 games):\n"
+            for name in names:
+                matches = players.find_players_by_full_name(name)
+                if not matches:
+                    continue
+                player_id = matches[0]["id"]
+                season = f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}"
+                df = playergamelog.PlayerGameLog(
+                    player_id=player_id,
+                    season=season,
+                    season_type_all_star="Regular Season"
+                ).get_data_frames()[0]
+                if df.empty:
+                    continue
+                last5 = df.head(5)["PTS"]
+                prop_line = last5.mean() * 1.1  # Assume prop ~10% higher than avg points
+                misses = sum(last5 < prop_line)
+                pct = (misses/5)*100
+                if pct >= 60:
+                    text += f"- {name}: Under {prop_line:.1f} pts → {misses}/5 ({pct:.0f}%)\n"
+            yield {"text": text}
+        except Exception as e:
+            logger.error(f"Error in handle_best_unders: {e}")
+            yield {"text": "❌ Error generating best unders."}
+
+    def handle_safe_picks(self):
+        try:
+            names = ["LeBron James", "Anthony Davis", "Stephen Curry", "Giannis Antetokounmpo", "Joel Embiid"]
+            text = "✅ Safe Picks (80%+ hit rate over/under):\n"
+            for name in names:
+                matches = players.find_players_by_full_name(name)
+                if not matches:
+                    continue
+                player_id = matches[0]["id"]
+                season = f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}"
+                df = playergamelog.PlayerGameLog(
+                    player_id=player_id,
+                    season=season,
+                    season_type_all_star="Regular Season"
+                ).get_data_frames()[0]
+                if df.empty:
+                    continue
+                last5 = df.head(5)["PTS"]
+                prop_line = last5.mean()
+                over_hits = sum(last5 > prop_line)
+                under_hits = sum(last5 < prop_line)
+                over_pct = (over_hits/5)*100
+                under_pct = (under_hits/5)*100
+                if over_pct >= 80:
+                    text += f"- {name}: Over {prop_line:.1f} pts ({over_pct:.0f}% hit)\n"
+                if under_pct >= 80:
+                    text += f"- {name}: Under {prop_line:.1f} pts ({under_pct:.0f}% hit)\n"
+            yield {"text": text}
+        except Exception as e:
+            logger.error(f"Error in handle_safe_picks: {e}")
+            yield {"text": "❌ Error generating safe picks."}
+
 
     def get_team_momentum(self, query):
         try:
