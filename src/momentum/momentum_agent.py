@@ -10,13 +10,6 @@ import numpy as np
 from nba_api.stats.endpoints import leaguedashteamstats
 
 
-
-
-
-
-
-
-
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -37,6 +30,7 @@ class MomentumAgent(AbstractAgent):
             "trend player <Name> <Stat> <PropLine>",
             "risk index <Name>",
             "simulate game <Team1> vs <Team2>",
+            "clutch leaders",
             "help"
         ]
         }
@@ -69,8 +63,13 @@ class MomentumAgent(AbstractAgent):
         if q_lower.startswith("rising star"):
             yield from self.rising_star_alert(query)
             return
+        
         if q_lower.startswith("simulate game"):
             yield from self.simulate_game(query)
+            return
+
+        if "clutch leaders" in q_lower:
+            yield from self.get_clutch_leaders()
             return
 
 
@@ -97,6 +96,33 @@ class MomentumAgent(AbstractAgent):
             return
 
         yield {"text": "🤔 Try `search player <Name>`, `hot streaks`, `risk index <Name>`, or `game pace`."}
+
+    def get_clutch_leaders(self):
+        try:
+            from nba_api.stats.endpoints import leaguedashplayerclutch
+
+            clutch = leaguedashplayerclutch.LeagueDashPlayerClutch(
+                clutch_time="Last 5 Minutes",
+                ahead_behind="Ahead or Behind",
+                point_diff=5,
+                season=f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}",
+                season_type_all_star="Regular Season",
+                per_mode_detailed="PerGame"
+            )
+
+            df = clutch.get_data_frames()[0]
+            df = df.sort_values(by="PTS", ascending=False).head(10)
+
+            text = "🧠 Top Clutch Scorers (Last 5 min, Close Games):\n"
+            for i, row in enumerate(df.itertuples(), start=1):
+                text += f"{i}. {row.PLAYER_NAME}: {row.PTS:.1f} PPG\n"
+
+            yield {"text": text}
+
+        except Exception as e:
+            logger.error(f"Error fetching clutch leaders: {e}")
+            yield {"text": "❌ Error fetching clutch leaders."}
+
 
     def simulate_game(self, query):
         try:
