@@ -20,9 +20,12 @@ class MomentumAgent(AbstractAgent):
             "commands": [
                 "search player <Name>",
                 "hot streaks",
-                "risk index <Name>",
-                "game pace",
-                "help"
+                "momentum rating <Name>",
+                "back to back",
+                "help", 
+                "game pace", 
+                "trend player", 
+                "risk index",
             ]
         }
 
@@ -37,13 +40,21 @@ class MomentumAgent(AbstractAgent):
         if q_lower.startswith("search player"):
             yield from self.handle_search_player(query)
             return
-        
+
         if q_lower.startswith("trend player"):
             yield from self.get_player_trend(query)
             return
 
+        if q_lower.startswith("momentum rating"):
+            yield from self.momentum_rating(query)
+            return
+
         if q_lower.startswith("risk index"):
             yield from self.handle_risk_index(query)
+            return
+
+        if "back to back" in q_lower:
+            yield from self.back_to_back()
             return
 
         if "hot streak" in q_lower:
@@ -60,6 +71,7 @@ class MomentumAgent(AbstractAgent):
             return
 
         yield {"text": "🤔 Try `search player <Name>`, `hot streaks`, `risk index <Name>`, or `game pace`."}
+
 
     def get_player_trend(self, query):
         try:
@@ -102,6 +114,71 @@ class MomentumAgent(AbstractAgent):
         except Exception as e:
             logger.error(f"Error in get_player_trend: {e}")
             yield {"text": "❌ Error checking trend. Try again."}
+
+    def momentum_rating(self, query):
+        name = query[len("momentum rating"):].strip()
+        matches = players.find_players_by_full_name(name)
+        if not matches:
+            yield {"text": f"❌ Couldn't find player '{name}'."}
+            return
+
+        player_id = matches[0]["id"]
+        season = f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}"
+        df = playergamelog.PlayerGameLog(
+            player_id=player_id,
+            season=season,
+            season_type_all_star="Regular Season"
+        ).get_data_frames()[0]
+
+        if df.empty:
+            yield {"text": f"❌ No game logs for {name.title()}."}
+            return
+
+        last5 = df.head(5)
+        score_sum = (last5["PTS"] + last5["REB"] + last5["AST"]).sum()
+        avg_score = score_sum / len(last5)
+
+        if avg_score >= 90:
+            label = "Sizzling 🔥"
+        elif avg_score >= 70:
+            label = "Strong 🏀"
+        elif avg_score >= 50:
+            label = "Medium 🚶"
+        else:
+            label = "Cold 🧊"
+
+        text = (
+            f"📈 Momentum Rating for {name.title()}:\n"
+            f"- Avg (PTS+REB+AST): {avg_score:.1f}\n"
+            f"- Rating: {label}"
+        )
+        yield {"text": text}
+
+    def back_to_back(self):
+        sb = scoreboardv2.ScoreboardV2()
+        dfs = sb.get_data_frames()
+        header_df = dfs[0]
+
+        if header_df.empty:
+            yield {"text": "❌ No games found for today."}
+            return
+
+        yesterday = datetime.now() - timedelta(days=1)
+        yesterday_str = yesterday.strftime("%Y-%m-%d")
+
+        text = "⚠️ Possible Back-to-Back Teams:\n"
+        found = False
+        for game in header_df.itertuples():
+            if yesterday_str in game.GAME_DATE_EST:
+                text += (
+                    f"- {game.HOME_TEAM_ABBREVIATION} or {game.VISITOR_TEAM_ABBREVIATION} played yesterday!\n"
+                )
+                found = True
+
+        if not found:
+            text = "✅ No back-to-back concerns for today."
+
+        yield {"text": text}
 
 
     def handle_search_player(self, query):
@@ -179,6 +256,7 @@ class MomentumAgent(AbstractAgent):
         dfs = sb.get_data_frames()
         header_df = dfs[0]
         line_df = dfs[1]
+
 
         if header_df.empty:
             yield {"text": "❌ No games found for today."}
