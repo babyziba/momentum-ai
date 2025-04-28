@@ -38,6 +38,14 @@ class MomentumAgent(AbstractAgent):
             "help"
         ]
         }
+    
+    DEFAULT_PROPS = [
+    ("LeBron James", "PTS", 24.5),
+    ("Anthony Davis", "REB", 9.5),
+    ("Stephen Curry", "3PM", 4.5),
+    ("Domantas Sabonis", "REB", 12.5),
+    ("Tyrese Haliburton", "AST", 8.5),
+]
 
     def assist(self, input_text: str, context: dict):
         query = input_text.strip()
@@ -84,9 +92,10 @@ class MomentumAgent(AbstractAgent):
             yield from self.handle_best_unders()
             return
 
-        if q_lower.startswith("safe picks"):
+        if "safe picks" in q_lower:
             yield from self.handle_safe_picks()
             return
+
 
         if "clutch leaders" in q_lower:
             yield from self.get_clutch_leaders()
@@ -200,14 +209,17 @@ class MomentumAgent(AbstractAgent):
             logger.error(f"Error in handle_best_unders: {e}")
             yield {"text": "❌ Error generating best unders."}
 
+
     def handle_safe_picks(self):
-        try:
-            names = ["LeBron James", "Anthony Davis", "Stephen Curry", "Giannis Antetokounmpo", "Joel Embiid"]
-            text = "✅ Safe Picks (80%+ hit rate over/under):\n"
-            for name in names:
+        text = "✅ Safe Picks (80%+ hit rate over/under):\n"
+        found = False
+
+        for name, stat, prop_line in self.DEFAULT_PROPS:
+            try:
                 matches = players.find_players_by_full_name(name)
                 if not matches:
                     continue
+
                 player_id = matches[0]["id"]
                 season = f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}"
                 df = playergamelog.PlayerGameLog(
@@ -215,22 +227,37 @@ class MomentumAgent(AbstractAgent):
                     season=season,
                     season_type_all_star="Regular Season"
                 ).get_data_frames()[0]
+
                 if df.empty:
                     continue
-                last5 = df.head(5)["PTS"]
-                prop_line = last5.mean()
-                over_hits = sum(last5 > prop_line)
-                under_hits = sum(last5 < prop_line)
-                over_pct = (over_hits/5)*100
-                under_pct = (under_hits/5)*100
-                if over_pct >= 80:
-                    text += f"- {name}: Over {prop_line:.1f} pts ({over_pct:.0f}% hit)\n"
-                if under_pct >= 80:
-                    text += f"- {name}: Under {prop_line:.1f} pts ({under_pct:.0f}% hit)\n"
-            yield {"text": text}
-        except Exception as e:
-            logger.error(f"Error in handle_safe_picks: {e}")
-            yield {"text": "❌ Error generating safe picks."}
+
+                stat_map = {
+                    "PTS": "PTS",
+                    "REB": "REB",
+                    "AST": "AST",
+                    "3PM": "FG3M"
+                }
+                if stat not in stat_map:
+                    continue
+
+                last5 = df.head(5)
+                values = last5[stat_map[stat]]
+                hits = sum(values > prop_line)
+                pct = (hits / 5) * 100
+
+                if pct >= 80:
+                    text += f"- {name} Over {prop_line} {stat}: {hits}/5 ({pct:.0f}%)\n"
+                    found = True
+
+            except Exception as e:
+                logger.error(f"Error in handle_safe_picks for {name}: {e}")
+                continue
+
+        if not found:
+            text = "⚠️ No 'safe picks' (80%+ hit) available today."
+
+        yield {"text": text}
+
 
 
     def get_team_momentum(self, query):
