@@ -7,6 +7,8 @@ from sentient_agent_framework.interface.agent import AbstractAgent
 from nba_api.stats.static import players
 from nba_api.stats.endpoints import playergamelog, scoreboardv2
 import numpy as np
+from nba_api.stats.endpoints import leaguedashteamstats
+
 
 
 
@@ -34,6 +36,7 @@ class MomentumAgent(AbstractAgent):
             "game pace",
             "trend player <Name> <Stat> <PropLine>",
             "risk index <Name>",
+            "simulate game <Team1> vs <Team2>",
             "help"
         ]
         }
@@ -66,6 +69,10 @@ class MomentumAgent(AbstractAgent):
         if q_lower.startswith("rising star"):
             yield from self.rising_star_alert(query)
             return
+        if q_lower.startswith("simulate game"):
+            yield from self.simulate_game(query)
+            return
+
 
         if "injury report" in q_lower:
             yield from self.injury_watch()
@@ -90,6 +97,55 @@ class MomentumAgent(AbstractAgent):
             return
 
         yield {"text": "🤔 Try `search player <Name>`, `hot streaks`, `risk index <Name>`, or `game pace`."}
+
+    def simulate_game(self, query):
+        try:
+            parts = query[len("simulate game"):].strip().split(" vs ")
+            if len(parts) != 2:
+                yield {"text": "⚠️ Usage: `simulate game <Team1> vs <Team2>`"}
+                return
+            
+            team1 = parts[0].strip().title()
+            team2 = parts[1].strip().title()
+
+            ratings = self.get_team_offensive_ratings()
+
+            if not ratings:
+                yield {"text": "❌ Could not load team ratings."}
+                return
+
+            avg_pace = 100  # keep simple for now
+
+            team1_rating = ratings.get(team1, 110)
+            team2_rating = ratings.get(team2, 110)
+
+            team1_score = int((avg_pace * team1_rating) / 100)
+            team2_score = int((avg_pace * team2_rating) / 100)
+
+            text = f"🎮 Simulated Final Score (real ratings):\n\n{team1} {team1_score} – {team2_score} {team2}"
+            yield {"text": text}
+
+        except Exception as e:
+            logger.error(f"Error in simulate_game: {e}")
+            yield {"text": "❌ Error simulating game. Try again."}
+
+
+
+    def get_team_offensive_ratings(self):
+        try:
+            teams = leaguedashteamstats.LeagueDashTeamStats(season=f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}")
+            df = teams.get_data_frames()[0]
+            ratings = {}
+
+            for row in df.itertuples():
+                ratings[row.TEAM_NAME] = getattr(row, "OFF_RATING", getattr(row, "OFFENSIVE_RATING", None))
+
+
+            return ratings
+        except Exception as e:
+            logger.error(f"Error fetching team ratings: {e}")
+            return {}
+
 
     def handle_multi_prop_trend(self, query):
             try:
