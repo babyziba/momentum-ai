@@ -8,6 +8,13 @@ from nba_api.stats.static import players
 from nba_api.stats.endpoints import playergamelog, scoreboardv2
 import numpy as np
 
+
+
+
+
+
+
+
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -17,16 +24,18 @@ class MomentumAgent(AbstractAgent):
 
     def list_available_commands(self):
         return {
-            "commands": [
-                "search player <Name>",
-                "hot streaks",
-                "momentum rating <Name>",
-                "back to back",
-                "help", 
-                "game pace", 
-                "trend player", 
-                "risk index",
-            ]
+        "commands": [
+            "search player <Name>",
+            "hot streaks",
+            "momentum rating <Name>",
+            "rising star <Name>",
+            "injury report",
+            "back to back",
+            "game pace",
+            "trend player <Name> <Stat> <PropLine>",
+            "risk index <Name>",
+            "help"
+        ]
         }
 
     def assist(self, input_text: str, context: dict):
@@ -42,8 +51,9 @@ class MomentumAgent(AbstractAgent):
             return
 
         if q_lower.startswith("trend player"):
-            yield from self.get_player_trend(query)
+            yield from self.handle_multi_prop_trend(query)
             return
+
 
         if q_lower.startswith("momentum rating"):
             yield from self.momentum_rating(query)
@@ -52,6 +62,15 @@ class MomentumAgent(AbstractAgent):
         if q_lower.startswith("risk index"):
             yield from self.handle_risk_index(query)
             return
+        
+        if q_lower.startswith("rising star"):
+            yield from self.rising_star_alert(query)
+            return
+
+        if "injury report" in q_lower:
+            yield from self.injury_watch()
+            return
+
 
         if "back to back" in q_lower:
             yield from self.back_to_back()
@@ -72,48 +91,93 @@ class MomentumAgent(AbstractAgent):
 
         yield {"text": "🤔 Try `search player <Name>`, `hot streaks`, `risk index <Name>`, or `game pace`."}
 
+    def handle_multi_prop_trend(self, query):
+            try:
+                parts = query.split()
+                if len(parts) < 5:
+                    yield {"text": "⚠️ Usage: `trend player <Name> <Stat> <PropLine>` (e.g., trend player LeBron James AST 5.5)"}
+                    return
 
-    def get_player_trend(self, query):
-        try:
-            parts = query.split()
-            if len(parts) < 4:
-                yield {"text": "⚠️ Usage: `trend player <Name> <prop_line>` (e.g., trend player LeBron James 20.5)"}
-                return
+                # Extract
+                name = " ".join(parts[2:-2])
+                stat = parts[-2].upper()
+                prop_line = float(parts[-1])
 
-            name = " ".join(parts[2:-1])
-            prop_line = float(parts[-1])
+                stat_map = {
+                    "PTS": "PTS",
+                    "AST": "AST",
+                    "REB": "REB",
+                    "3PM": "FG3M"  # 3-point made
+                }
+                if stat not in stat_map:
+                    yield {"text": "⚠️ Stat must be one of: PTS, AST, REB, 3PM."}
+                    return
 
-            matches = players.find_players_by_full_name(name)
-            if not matches:
-                yield {"text": f"❌ Couldn't find a player named '{name}'."}
-                return
+                matches = players.find_players_by_full_name(name)
+                if not matches:
+                    yield {"text": f"❌ Couldn't find a player named '{name}'."}
+                    return
 
-            player_id = matches[0]["id"]
-            season = f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}"
-            df = playergamelog.PlayerGameLog(
-                player_id=player_id,
-                season=season,
-                season_type_all_star="Regular Season"
-            ).get_data_frames()[0]
+                player_id = matches[0]["id"]
+                season = f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}"
+                df = playergamelog.PlayerGameLog(
+                    player_id=player_id,
+                    season=season,
+                    season_type_all_star="Regular Season"
+                ).get_data_frames()[0]
 
-            if df.empty:
-                yield {"text": f"❌ No game logs for {name.title()} in {season}."}
-                return
+                if df.empty:
+                    yield {"text": f"❌ No game logs for {name.title()} in {season}."}
+                    return
 
-            last5_pts = df["PTS"].head(5)
-            hits = sum(last5_pts > prop_line)
-            pct = (hits / 5) * 100
+                last5 = df.head(5)
+                values = last5[stat_map[stat]]
+                hits = sum(values > prop_line)
+                pct = (hits / 5) * 100
 
-            text = (
-                f"📈 {name.title()} vs {prop_line} pts:\n"
-                f"Hit {hits}/5 games ({pct:.0f}%)\n"
-                f"({', '.join(str(int(x)) for x in last5_pts)})"
+                text = (
+                    f"📈 {name.title()} {stat} vs {prop_line}:\n"
+                    f"Hit {hits}/5 games ({pct:.0f}%)\n"
+                    f"({', '.join(str(int(x)) for x in values)})"
+                )
+                yield {"text": text}
 
-            )
-            yield {"text": text}
-        except Exception as e:
-            logger.error(f"Error in get_player_trend: {e}")
-            yield {"text": "❌ Error checking trend. Try again."}
+            except Exception as e:
+                logger.error(f"Error in handle_multi_prop_trend: {e}")
+                yield {"text": "❌ Error checking trend. Try again."}
+
+
+    def rising_star_alert(self, query):
+        name = query[len("rising star"):].strip()
+        matches = players.find_players_by_full_name(name)
+        if not matches:
+            yield {"text": f"❌ Couldn't find player '{name}'."}
+            return
+
+        player_id = matches[0]["id"]
+        season = f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}"
+        df = playergamelog.PlayerGameLog(
+            player_id=player_id,
+            season=season,
+            season_type_all_star="Regular Season"
+        ).get_data_frames()[0]
+
+        if df.empty:
+            yield {"text": f"❌ No games found for {name.title()} in {season}."}
+            return
+
+        season_avg = df["PTS"].mean()
+        last5_avg = df["PTS"].head(5).mean()
+        diff = last5_avg - season_avg
+
+        if diff >= 5:
+            yield {"text": f"🚀 Rising Star Alert: {name.title()} averaging +{diff:.1f} PPG over season average!"}
+        else:
+            yield {"text": f"ℹ️ {name.title()}'s recent PPG change: {diff:.1f} — not a major surge."}
+
+    def injury_watch(self):
+        text = "🩼Coming Soon!\n"
+        yield {"text": text}
 
     def momentum_rating(self, query):
         name = query[len("momentum rating"):].strip()
