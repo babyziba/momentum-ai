@@ -31,6 +31,7 @@ class MomentumAgent(AbstractAgent):
             "risk index <Name>",
             "simulate game <Team1> vs <Team2>",
             "clutch leaders",
+            "team momentum <Team Abbreviation>",
             "help"
         ]
         }
@@ -67,6 +68,11 @@ class MomentumAgent(AbstractAgent):
         if q_lower.startswith("simulate game"):
             yield from self.simulate_game(query)
             return
+        
+        if q_lower.startswith("team momentum"):
+            yield from self.get_team_momentum(query)
+            return
+
 
         if "clutch leaders" in q_lower:
             yield from self.get_clutch_leaders()
@@ -122,6 +128,52 @@ class MomentumAgent(AbstractAgent):
         except Exception as e:
             logger.error(f"Error fetching clutch leaders: {e}")
             yield {"text": "❌ Error fetching clutch leaders."}
+
+    def get_team_momentum(self, query):
+        try:
+            parts = query.split()
+            if len(parts) < 3:
+                yield {"text": "⚠️ Usage: `team momentum <Team Abbreviation>` (e.g., team momentum LAL)"}
+                return
+
+            team_abbr = parts[2].upper()
+
+            from nba_api.stats.endpoints import teamgamelog
+            from nba_api.stats.static import teams
+
+            team_list = teams.get_teams()
+            team_id = next((t['id'] for t in team_list if t['abbreviation'] == team_abbr), None)
+
+            if not team_id:
+                yield {"text": f"❌ Could not find team '{team_abbr}'."}
+                return
+
+            season = f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}"
+            df = teamgamelog.TeamGameLog(
+                team_id=team_id,
+                season=season,
+                season_type_all_star="Regular Season"
+            ).get_data_frames()[0]
+
+            if df.empty:
+                yield {"text": f"❌ No games found for {team_abbr}."}
+                return
+
+            last5 = df.head(5)
+            wins = sum(last5['WL'] == "W")
+            ortg_diff = last5['PTS'].mean() - last5['PTS'].tail(5).mean()
+
+            text = (
+                f"🏀 {team_abbr} Momentum Report:\n"
+                f"- Last 5 Games: {wins} Wins\n"
+                f"- ORTG Trend: {ortg_diff:+.1f} PPG vs previous 5\n"
+            )
+            yield {"text": text}
+
+        except Exception as e:
+            logger.error(f"Error in get_team_momentum: {e}")
+            yield {"text": "❌ Error fetching team momentum."}
+
 
 
     def simulate_game(self, query):
