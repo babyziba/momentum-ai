@@ -1,14 +1,19 @@
 # src/momentum/momentum_agent.py
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import numpy as np
+import pandas
 from sentient_agent_framework.interface.agent import AbstractAgent
 from nba_api.stats.static import players
 from nba_api.stats.endpoints import playergamelog, scoreboardv2
-import numpy as np
 from nba_api.stats.endpoints import leaguedashteamstats
 from nba_api.stats.endpoints import leaguedashplayerstats
+from nba_api.stats.endpoints import teamgamelog
+from nba_api.stats.static import teams
+from nba_api.stats.endpoints import leaguedashplayerclutch
+from nba_api.stats.endpoints import playbyplayv2
+from nba_api.stats.endpoints import boxscoreadvancedv2
 
 
 logger = logging.getLogger(__name__)
@@ -44,7 +49,11 @@ class MomentumAgent(AbstractAgent):
             "safe picks",
             "consistency player <Name> <Stat> <PropLine>",
             "auto flex",
-            "trend breakers"
+            "trend breakers",
+            "mismatch ratings",
+            "fatigue watch",
+            "recent plays <GameID>",
+            "advanced stats <GameID>",
             "help"
         ]
         }
@@ -56,7 +65,6 @@ class MomentumAgent(AbstractAgent):
     ("Domantas Sabonis", "REB", 12.5),
     ("Tyrese Haliburton", "AST", 8.5),
 
-    
 ]
     
 
@@ -74,6 +82,14 @@ class MomentumAgent(AbstractAgent):
 
         if q_lower.startswith("trend player"):
             yield from self.handle_multi_prop_trend(query)
+            return
+
+        if q_lower.startswith("recent plays"):
+            yield from self.get_recent_plays(query)
+            return
+
+        if q_lower.startswith("advanced stats"):
+            yield from self.get_advanced_boxscore(query)
             return
 
 
@@ -118,7 +134,13 @@ class MomentumAgent(AbstractAgent):
             yield from self.handle_auto_trend_breakers()
             return
 
-
+        if "mismatch ratings" in q_lower:
+            yield from self.get_mismatch_ratings()
+            return
+        
+        if "fatigue watch" in q_lower:
+            yield from self.check_fatigue_alert()
+            return
 
         if "safe picks" in q_lower:
             yield from self.handle_safe_picks()
@@ -156,7 +178,6 @@ class MomentumAgent(AbstractAgent):
 
     def get_clutch_leaders(self):
         try:
-            from nba_api.stats.endpoints import leaguedashplayerclutch
 
             clutch = leaguedashplayerclutch.LeagueDashPlayerClutch(
                 clutch_time="Last 5 Minutes",
@@ -232,6 +253,131 @@ class MomentumAgent(AbstractAgent):
         except Exception as e:
             logger.error(f"Error in handle_consistency_tracker: {e}")
             yield {"text": "❌ Error checking consistency."}
+
+
+    def get_mismatch_ratings(self):
+        try:
+            from nba_api.stats.endpoints import leaguedashteamstats
+
+            df = leaguedashteamstats.LeagueDashTeamStats(
+                season=f"{datetime.now().year-1}-{str(datetime.now().year)[-2:]}",
+                season_type_all_star=detect_season_type(),
+                per_mode_detailed="PerGame",
+                measure_type_detailed_defense="Defense"  
+            ).get_data_frames()[0]
+
+
+            df = df.sort_values(by="DEF_RATING", ascending=False) 
+            bottom5 = df.head(5)
+
+            text = "🎯 Defensive Mismatches (Bottom 5 Teams):\n"
+            for row in bottom5.itertuples():
+                text += f"- {row.TEAM_NAME}: {row.DEF_RATING:.1f} Defensive Rating\n"
+
+            yield {"text": text}
+
+        except Exception as e:
+            logger.error(f"Error fetching mismatch ratings: {e}")
+            yield {"text": "❌ Error fetching mismatch ratings."}
+
+    def get_recent_plays(self, query):
+        try:
+            game_id = query.strip().split("recent plays")[-1].strip()
+
+            pbp = playbyplayv2.PlayByPlayV2(game_id=game_id)
+            df = pbp.get_data_frames()[0]
+
+            if df.empty:
+                yield {"text": "❌ No recent plays found for this game ID."}
+                return
+
+            last10 = df.tail(10)
+
+            text = "⏱️ Last 10 Plays:\n"
+            for row in last10.itertuples():
+                text += f"- {row.PCTIMESTRING} {row.HOMEDESCRIPTION or ''} {row.VISITORDESCRIPTION or ''}\n"
+
+            yield {"text": text}
+
+        except Exception as e:
+            logger.error(f"Error fetching recent plays: {e}")
+            yield {"text": "❌ Error fetching recent plays."}
+
+
+
+    def get_advanced_boxscore(self, query):
+        try:
+            game_id = query.strip().split("advanced stats")[-1].strip()
+
+            box = boxscoreadvancedv2.BoxScoreAdvancedV2(game_id=game_id)
+            df = box.get_data_frames()[0]
+
+            if df.empty:
+                yield {"text": "❌ No advanced stats found for this game ID."}
+                return
+
+            text = "📊 Advanced Box Score:\n"
+            for row in df.itertuples():
+                text += (
+                    f"- {row.TEAM_ABBREVIATION}: "
+                    f"OffRtg {row.OFF_RATING:.1f}, "
+                    f"DefRtg {row.DEF_RATING:.1f}, "
+                    f"Pace {row.PACE:.1f}\n"
+                )
+
+            yield {"text": text}
+        except Exception as e:
+            logger.error(f"Error fetching advanced box: {e}")
+            yield {"text": "❌ Error fetching advanced stats."}
+
+
+
+    def check_fatigue_alert(self):
+        try:
+
+            today = datetime.now()
+            yesterday = today - timedelta(days=1)
+            yesterday_str = yesterday.strftime("%Y-%m-%d")
+
+            sb = scoreboardv2.ScoreboardV2(
+                game_date=today.strftime("%m/%d/%Y")
+            )
+            games_today = sb.get_data_frames()[0]
+            games_today.columns = [c.upper() for c in games_today.columns]
+
+            text = "🩼 Fatigue Watch Today:\n"
+            found = False
+
+            for game in games_today.itertuples():
+                for team_id in [game.HOME_TEAM_ID, game.VISITOR_TEAM_ID]:
+                    team_list = teams.get_teams()
+                    team_info = next((t for t in team_list if t['id'] == team_id), None)
+                    if not team_info:
+                        continue
+
+                    team_abbr = team_info['abbreviation']
+
+                    gamelog = teamgamelog.TeamGameLog(
+                        team_id=team_id,
+                        season=f"{today.year-1}-{str(today.year)[-2:]}",
+                        season_type_all_star=detect_season_type()
+                    ).get_data_frames()[0]
+
+                    recent = gamelog[gamelog['GAME_DATE'] >= yesterday_str]
+                    if not recent.empty:
+                        text += f"- {team_abbr}: Played yesterday ⚠️\n"
+                        found = True
+
+
+            if not found:
+                text += "✅ No fatigue concerns detected."
+
+            yield {"text": text}
+
+        except Exception as e:
+            logger.error(f"Error checking fatigue: {e}")
+            yield {"text": "❌ Error checking fatigue."}
+
 
 
     def handle_auto_flex_builder(self):
@@ -849,14 +995,14 @@ class MomentumAgent(AbstractAgent):
             yield {"text": "❌ No games found for today."}
             return
 
-        text = "🏎️ Projected Game Pace:\n"
+        text = "Projected Game Pace:\n"
         for game in header_df.itertuples():
             pace = getattr(game, "POSS", None)
             if pace is None or (isinstance(pace, float) and np.isnan(pace)):
                 continue
             text += f"{game.HOME_TEAM_ABBREVIATION} vs {game.VISITOR_TEAM_ABBREVIATION}: {pace:.1f} possessions\n"
 
-        if text == "🏎️ Projected Game Pace:\n":
+        if text == "Projected Game Pace:\n":
             text = "⚠️ No possession data available for today."
 
         yield {"text": text}
